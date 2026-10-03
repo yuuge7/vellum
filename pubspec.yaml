@@ -8,7 +8,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # publishes "Vellum vX.Y" and commits the next version back here. Only edit it
 # by hand to jump ahead (e.g. set 2.0.0 for a major release); the build number
 # after "+" is always major * 10000 + minor (Android versionCode).
-version: 1.0.0+10000
+version: 1.1.0+10001
 
 environment:
   sdk: ^3.13.0
