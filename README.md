@@ -25,20 +25,27 @@ Vellum overlays a reference image on the live camera feed. It can anchor the ima
 **Tracing**
 - Full-screen back camera with the reference image drawn on top; flashlight toggle while tracing.
 - Pinch to resize, drag to move, twist to rotate. Fit, Mirror and Rotate 90° shortcuts.
+- **Crop** trims borders, captions or neighbouring drawings off a saved picture. What is left stays exactly where it was on the page.
+- **Grid** lays 3, 4 or 6 square cells across the picture for checking proportions and working a large sheet section by section.
 - **Lock** ignores all touches on the image so a resting hand never nudges it.
 - Opacity slider (0–100 %) and **Strobe**, which flickers the image (on/off or 50 %/off, 1–8 Hz) so gaps between your lines and the reference stand out.
+- The round **strobe key** beside the opacity slider works from anywhere, including with the controls hidden: tap it to switch the strobe on or off, or hold it to flash the image only while you look.
 
 **Pin to paper (AR)**
 - **Sheet edges** finds the four corners of the page and keeps the image glued to it, even when a hand covers a corner.
 - **Surface** tracks texture on any flat surface when there is no clean sheet in view.
+- **Centre on the sheet** places the picture in the middle of the detected page with an even margin, following the page's perspective so the drawing is not skewed when the phone looks at it from an angle.
 - Runs on a background isolate; the pose is smoothed so the overlay stays steady without lagging.
 
 **Image tools**
+- **Ink**: for finished artwork (line art, illustrations, saved pins). Drops the page behind the drawing and keeps its marks, in any ink colour, so you see your own paper between the lines. Works for light art on a dark page too.
 - **Lines**: turns a photo into clean outlines, with adjustable detail, line weight and ink colour.
 - **Tones**: splits a photo into 3 or 4 brightness bands (shadows to highlights), each toggleable, in grey or colour-coded.
 
 **Content**
 - Import from the Android photo picker or take a photo with the camera.
+- **Share to Vellum**: in a gallery, browser or file manager choose Share (or Open with) and pick *Trace with Vellum*; the picture opens straight in the tracer.
+- **Your pieces**: every imported picture stays on a shelf on the home screen, so a drawing that takes several sittings is one tap away. Hold a piece to remove it.
 - Built-in templates: animals, botanical, objects, people, patterns and photo-like scenes.
 - Step-by-step lessons (Cat face, Tulip, Head proportions, Cube in perspective). Each step fades in over dimmed earlier steps.
 - Any photo can become a lesson: outline, shadows, mid-tones, highlights.
@@ -102,6 +109,17 @@ flutter build apk --debug  # confirms the Android (Kotlin) side compiles
 
 Set the emulator's back camera to **VirtualScene** (Device Manager > Edit > Advanced settings). Hold Alt and use the mouse with W/A/S/D/Q/E to move around the scene; Extended controls > Camera lets you place an image on the wall or table. That is enough to exercise the camera overlay, time-lapse and AR tracking without a phone, but check Pin to paper on a real device over a real sheet before relying on it.
 
+To hand the app a picture the way another app would, push one to the device and open it with a read grant:
+
+```bash
+adb push pin.jpg /sdcard/Pictures/ && adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///sdcard/Pictures/pin.jpg
+adb shell content query --uri content://media/external/images/media --projection _id:_display_name   # find its id
+adb shell am start -a android.intent.action.VIEW -t image/jpeg -d content://media/external/images/media/<id> \
+  --grant-read-uri-permission -n com.vellum.ar_drawing/.MainActivity
+```
+
+`am start -a android.intent.action.SEND` cannot grant access to the stream it passes, so test Share from the Photos app instead.
+
 ## Project structure
 
 ```
@@ -110,12 +128,13 @@ lib/
   camera/            camera service, camera-to-screen geometry, AR session glue
   capture/           time-lapse recorder (Dart side)
   content/           procedural templates, lessons, shared pen styles
-  imaging/           line art, tonal breakdown, YUV conversion, image helpers
+  imaging/           ink lift, line art, tonal breakdown, YUV conversion, image helpers
+  library/           saved pieces (shelf on the home screen), pictures shared from other apps
   models/            overlay state, lesson state machine, trace documents
   tracking/          homography geometry, image ops, KLT, sheet detector, tracker, isolate worker
-  ui/                theme, home screen, trace screen, painters, widgets
+  ui/                theme, home screen, trace screen, crop screen, painters, widgets
 android/app/src/main/kotlin/com/vellum/ar_drawing/
-  MainActivity.kt        method channel "vellum/timelapse"
+  MainActivity.kt        method channels "vellum/timelapse" and "vellum/share"
   TimelapseEncoder.kt    MediaCodec H.264 encoder
 test/                unit tests, with a synthetic camera scene for the tracker
 .github/workflows/   CI for pull requests, automatic releases from main
@@ -128,7 +147,7 @@ test/                unit tests, with a synthetic camera scene for the tracker
 - *Surface*: Shi-Tomasi features followed by pyramidal Lucas-Kanade optical flow with forward-backward checks.
 - Both estimate a homography with RANSAC. In sheet mode the feature pose is fused with the sheet outline to correct drift. The result is smoothed with One Euro filters and applied to the overlay as a perspective transform.
 
-**Imaging** (`lib/imaging`). Line art is a Canny pipeline: blur, Sobel, non-maximum suppression, hysteresis and speck removal. Tones use multi-level Otsu thresholding.
+**Imaging** (`lib/imaging`). Ink takes the page colour from the image border and turns each pixel's distance from it into opacity, which keeps a pen stroke as one stroke where edge detection would outline both of its sides. Line art is a Canny pipeline: blur, Sobel, non-maximum suppression, hysteresis and speck removal. Tones use multi-level Otsu thresholding.
 
 **Time-lapse** (`lib/capture`, `TimelapseEncoder.kt`). Composites of the camera frame and the overlay are streamed over a method channel into a native MediaCodec encoder and saved to the gallery.
 
@@ -227,4 +246,6 @@ If a secret is missing, the workflow stops before bumping the version, and the b
 
 The merged manifest also lists microphone (`RECORD_AUDIO`, declared by the CameraX plugin) and `ACCESS_NETWORK_STATE` (declared by AndroidX Media3). Vellum records video without sound and never asks for the microphone.
 
-Vellum has no internet permission. Photos, camera frames and recordings are processed on the device and never leave it.
+Vellum has no internet permission. Photos, camera frames and recordings are processed on the device and never leave it. Because of that it can open pictures shared from other apps but not links, so save or download a pin first and share the image itself.
+
+The *Your pieces* shelf keeps a copy of each imported picture (the 12 most recent) in the app's private storage. Removing a piece, clearing the app's data or uninstalling deletes the copies; the originals in your gallery are never changed.

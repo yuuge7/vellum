@@ -20,13 +20,14 @@ class StepLayer {
 /// Everything that can be traced: a single image (photo or template) or an
 /// ordered set of lesson layers.
 class TraceDocument {
-  TraceDocument.image({required this.title, required ui.Image this.image, this.isPhoto = true})
+  TraceDocument.image({required this.title, required ui.Image this.image, this.isPhoto = true, this.pieceId})
       : steps = null,
         size = Size(image.width.toDouble(), image.height.toDouble());
 
   TraceDocument.lesson({required this.title, required List<StepLayer> this.steps, required this.size})
       : image = null,
-        isPhoto = false;
+        isPhoto = false,
+        pieceId = null;
 
   final String title;
   final ui.Image? image;
@@ -35,6 +36,9 @@ class TraceDocument {
 
   /// Photos (and photo-like templates) unlock line and tone extraction.
   final bool isPhoto;
+
+  /// Id of the saved piece (see `RecentsStore`) this image was opened from.
+  final String? pieceId;
 
   bool get isLesson => steps != null;
 

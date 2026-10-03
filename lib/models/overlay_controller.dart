@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 
 import '../imaging/image_io.dart';
+import '../imaging/ink.dart';
 import '../imaging/raster.dart';
 import '../imaging/stencil.dart';
 import '../imaging/tonal.dart';
@@ -14,7 +15,7 @@ import '../tracking/geometry.dart';
 import 'lesson_player.dart';
 import 'trace_document.dart';
 
-enum ViewMode { original, lines, tones }
+enum ViewMode { original, ink, lines, tones }
 
 enum StrobeStyle {
   blink('On / off'),
@@ -43,6 +44,8 @@ const List<Color> _codedTones4 = [Color(0xFF3A2FA0), Color(0xFF148C84), Color(0x
 // Top-level so the isolate closures capture nothing but their arguments.
 Future<Rgba> _linesInBackground(Rgba src, double detail, int weight) =>
     Isolate.run(() => extractLineArt(src, detail: detail, weight: weight));
+
+Future<Rgba> _inkInBackground(Rgba src, double detail) => Isolate.run(() => extractInk(src, detail: detail));
 
 Future<TonalBreakdown> _tonesInBackground(Rgba src, int levels) => Isolate.run(() => tonalBreakdown(src, levels: levels));
 
@@ -102,6 +105,47 @@ class OverlayController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Centres the content on a detected sheet with an even [margin] (fraction
+  /// of the sheet's short side). [corners] are the sheet corners in view
+  /// coordinates, in order around the sheet. The placement follows the
+  /// sheet's perspective, so the drawing comes out undistorted on the paper
+  /// even when the phone looks at it from an angle.
+  bool fitToSheet(List<Offset> corners, {double margin = 0.08}) {
+    if (_locked || corners.length != 4) return false;
+    // The detector orders corners in sensor space, which is rotated against
+    // the screen. Go clockwise from the corner nearest the screen's top-left
+    // so the picture stays upright as the user sees it.
+    var twiceArea = 0.0;
+    var start = 0;
+    for (var i = 0; i < 4; i++) {
+      final a = corners[i], b = corners[(i + 1) % 4];
+      twiceArea += a.dx * b.dy - b.dx * a.dy;
+    }
+    final cw = twiceArea >= 0 ? corners : corners.reversed.toList();
+    for (var i = 1; i < 4; i++) {
+      if (cw[i].dx + cw[i].dy < cw[start].dx + cw[start].dy) start = i;
+    }
+    final quad = <Offset>[for (var i = 0; i < 4; i++) cw[(start + i) % 4]];
+    // Approximate sheet proportions from the opposite side lengths.
+    final sw = ((quad[1] - quad[0]).distance + (quad[2] - quad[3]).distance) / 2;
+    final sh = ((quad[3] - quad[0]).distance + (quad[2] - quad[1]).distance) / 2;
+    if (sw < 8 || sh < 8) return false;
+    final toView = homographyFromPoints(
+      <Pt>[const Pt(0, 0), Pt(sw, 0), Pt(sw, sh), Pt(0, sh)],
+      <Pt>[for (final q in quad) Pt(q.dx, q.dy)],
+    );
+    if (toView == null) return false;
+    final cs = doc.size;
+    final inset = margin * math.min(sw, sh);
+    final s = math.min((sw - 2 * inset) / cs.width, (sh - 2 * inset) / cs.height);
+    final onSheet = Homography.scaleTranslate(s, (sw - cs.width * s) / 2, (sh - cs.height * s) / 2);
+    base.value = ((pose.value.inverse() ?? Homography.identity()) * toView * onSheet).normalized();
+    _placed = true;
+    _flipped = false;
+    notifyListeners();
+    return true;
+  }
+
   /// Applies a screen-space gesture delta. While anchored the delta is
   /// expressed in paper space so the image stays pinned afterwards.
   void applyViewDelta(Homography d) {
@@ -140,6 +184,17 @@ class OverlayController extends ChangeNotifier {
   bool get locked => _locked;
   set locked(bool v) {
     _locked = v;
+    notifyListeners();
+  }
+
+  // ------------------------------------------------------------ grid
+
+  int _grid = 0;
+
+  /// Square guide cells across the image's short side (0 = no grid).
+  int get grid => _grid;
+  set grid(int v) {
+    _grid = v;
     notifyListeners();
   }
 
@@ -213,8 +268,49 @@ class OverlayController extends ChangeNotifier {
   Future<void> setMode(ViewMode m) async {
     _mode = m;
     notifyListeners();
+    if (m == ViewMode.ink && _ink == null) await recomputeInk();
     if (m == ViewMode.lines && _lines == null) await recomputeLines();
     if (m == ViewMode.tones && _tones == null) await recomputeTones();
+  }
+
+  // Ink
+  ui.Image? _ink;
+  double _inkDetail = 0.5;
+  int _inkJob = 0;
+
+  ui.Image? get inkImage => _ink;
+  double get inkDetail => _inkDetail;
+
+  set inkDetail(double v) {
+    _inkDetail = v.clamp(0.0, 1.0);
+    notifyListeners();
+    recomputeInk();
+  }
+
+  Future<void> recomputeInk() async {
+    if (doc.image == null) return;
+    final job = ++_inkJob;
+    _busy = 'Lifting the artwork';
+    notifyListeners();
+    try {
+      final src = await _sourcePixels();
+      final out = await _inkInBackground(src, _inkDetail);
+      final img = await rgbaToImage(out);
+      if (_disposed || job != _inkJob) {
+        img.dispose();
+        return;
+      }
+      _ink?.dispose();
+      _ink = img;
+      _error = null;
+    } catch (e) {
+      _error = 'Could not lift the artwork: $e';
+    } finally {
+      if (job == _inkJob && !_disposed) {
+        _busy = null;
+        notifyListeners();
+      }
+    }
   }
 
   // Lines
@@ -404,13 +500,37 @@ class OverlayController extends ChangeNotifier {
     pose.value = o.pose.value;
     _opacity = o._opacity;
     _placed = o._placed;
+    _grid = o._grid;
     notifyListeners();
+  }
+
+  /// Takes over from [o] after its image was cropped to [crop] (in [o]'s
+  /// pixels). What is left of the picture stays exactly where it was, and
+  /// the look carries over.
+  void adoptCrop(OverlayController o, Rect crop) {
+    base.value = o.base.value * Homography.scaleTranslate(1, crop.left, crop.top);
+    pose.value = o.pose.value;
+    _placed = o._placed;
+    _flipped = o._flipped;
+    _opacity = o._opacity;
+    _locked = o._locked;
+    _grid = o._grid;
+    _inkDetail = o._inkDetail;
+    _lineDetail = o._lineDetail;
+    _lineWeight = o._lineWeight;
+    _lineInk = o._lineInk;
+    _toneLevels = o._toneLevels;
+    _toneColorCoded = o._toneColorCoded;
+    _strobeHz = o._strobeHz;
+    _strobeStyle = o._strobeStyle;
+    setMode(o._mode);
   }
 
   @override
   void dispose() {
     _disposed = true;
     _strobeTimer?.cancel();
+    _ink?.dispose();
     _lines?.dispose();
     for (final i in _tones ?? const <ui.Image>[]) {
       i.dispose();

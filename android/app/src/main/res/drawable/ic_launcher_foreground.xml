@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Tilted vellum sheet carrying a printer's registration mark. Everything
+     stays inside the 66dp safe zone of the 108dp canvas. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:rotation="-7">
+        <!-- Soft shadow under the sheet. -->
+        <path
+            android:fillColor="#000000"
+            android:fillAlpha="0.38"
+            android:pathData="M38.5,33.5h36a2,2 0 0 1 2,2v44a2,2 0 0 1 -2,2h-36a2,2 0 0 1 -2,-2v-44a2,2 0 0 1 2,-2z" />
+        <!-- Sheet. -->
+        <path
+            android:fillColor="#ECE9E2"
+            android:pathData="M37,30h34a2,2 0 0 1 2,2v44a2,2 0 0 1 -2,2h-34a2,2 0 0 1 -2,-2v-44a2,2 0 0 1 2,-2z" />
+        <!-- Registration mark: filled quadrants, ring, crosshair. -->
+        <path
+            android:fillColor="#2F9BD6"
+            android:pathData="M54,54V45A9,9 0 0 1 63,54ZM54,54V63A9,9 0 0 1 45,54Z" />
+        <path
+            android:strokeColor="#2F9BD6"
+            android:strokeWidth="2.4"
+            android:pathData="M54,45A9,9 0 1 1 53.99,45Z" />
+        <path
+            android:strokeColor="#2F9BD6"
+            android:strokeWidth="2.4"
+            android:strokeLineCap="round"
+            android:pathData="M39,54H69M54,39V69" />
+    </group>
+</vector>

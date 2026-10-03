@@ -19,6 +19,21 @@ class CameraService extends ChangeNotifier {
   Future<void> _streamOp = Future<void>.value();
   final Set<FrameListener> _listeners = <FrameListener>{};
 
+  /// Closing a controller unbinds the camera for every controller, so a new
+  /// one must not open until the previous one has finished letting go.
+  static Future<void> _released = Future<void>.value();
+
+  static void _close(CameraController c) {
+    _released = _released.then((_) async {
+      try {
+        if (c.value.isStreamingImages) await c.stopImageStream();
+      } catch (_) {}
+      try {
+        await c.dispose();
+      } catch (_) {}
+    });
+  }
+
   CameraController? get controller => _controller;
   CameraDescription? get description => _description;
   bool get ready => _controller?.value.isInitialized ?? false;
@@ -35,6 +50,7 @@ class CameraService extends ChangeNotifier {
     _error = null;
     notifyListeners();
     try {
+      await _released;
       final cams = await availableCameras();
       if (cams.isEmpty) {
         _error = 'No camera found on this device.';
@@ -49,7 +65,7 @@ class CameraService extends ChangeNotifier {
       );
       await c.initialize();
       if (_disposed) {
-        await c.dispose();
+        _close(c);
         return;
       }
       _controller = c;
@@ -82,10 +98,8 @@ class CameraService extends ChangeNotifier {
     _streaming = false;
     if (!_disposed) notifyListeners();
     if (c != null) {
-      try {
-        if (c.value.isStreamingImages) await c.stopImageStream();
-      } catch (_) {}
-      await c.dispose();
+      _close(c);
+      await _released;
     }
   }
 
@@ -154,14 +168,7 @@ class CameraService extends ChangeNotifier {
     _listeners.clear();
     final c = _controller;
     _controller = null;
-    if (c != null) {
-      () async {
-        try {
-          if (c.value.isStreamingImages) await c.stopImageStream();
-        } catch (_) {}
-        await c.dispose();
-      }();
-    }
+    if (c != null) _close(c);
     super.dispose();
   }
 }

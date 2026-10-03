@@ -66,6 +66,13 @@ void paintOverlay(Canvas canvas, OverlayController c, {bool forExport = false}) 
     switch (c.mode) {
       case ViewMode.original:
         _drawLayer(canvas, doc.image!, rect, 1);
+      case ViewMode.ink:
+        final k = c.inkImage;
+        if (k == null) {
+          _drawLayer(canvas, doc.image!, rect, 0.25);
+        } else {
+          _drawLayer(canvas, k, rect, 1, c.lineInk.color);
+        }
       case ViewMode.lines:
         final l = c.linesImage;
         if (l == null) {
@@ -86,7 +93,45 @@ void paintOverlay(Canvas canvas, OverlayController c, {bool forExport = false}) 
     }
   }
   canvas.restore();
+  if (c.grid > 0) _drawGrid(canvas, c, rect, alpha);
   canvas.restore();
+}
+
+/// Square guide cells counted across the short side, in content space so the
+/// grid sticks to the picture. Stays readable when the image is faint, but
+/// goes dark with it (opacity 0, strobe off-phase): those moments are for
+/// looking at the bare drawing.
+void _drawGrid(Canvas canvas, OverlayController c, Rect rect, double alpha) {
+  final m = c.effective.m;
+  final w8 = m[8].abs() < 1e-9 ? 1.0 : m[8].abs();
+  final scale = math.sqrt((m[0] * m[4] - m[1] * m[3]).abs()) / w8;
+  if (scale < 1e-6) return;
+  final cell = rect.shortestSide / c.grid;
+  final path = Path()..addRect(rect);
+  for (var x = cell; x < rect.width - 0.5; x += cell) {
+    path
+      ..moveTo(x, 0)
+      ..lineTo(x, rect.height);
+  }
+  for (var y = cell; y < rect.height - 0.5; y += cell) {
+    path
+      ..moveTo(0, y)
+      ..lineTo(rect.width, y);
+  }
+  final a = math.max(alpha, 0.5);
+  final stroke = Paint()..style = PaintingStyle.stroke;
+  canvas.drawPath(
+    path,
+    stroke
+      ..strokeWidth = 3 / scale
+      ..color = Colors.black.withValues(alpha: 0.3 * a),
+  );
+  canvas.drawPath(
+    path,
+    stroke
+      ..strokeWidth = 1.2 / scale
+      ..color = Palette.blue.withValues(alpha: a),
+  );
 }
 
 class OverlayPainter extends CustomPainter {

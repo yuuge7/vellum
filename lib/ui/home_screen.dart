@@ -1,9 +1,14 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../content/lessons.dart';
 import '../content/templates.dart';
 import '../imaging/image_io.dart';
+import '../library/recents.dart';
+import '../library/share_inbox.dart';
 import '../models/trace_document.dart';
 import 'overlay_painter.dart';
 import 'theme.dart';
@@ -20,32 +25,106 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   TemplateCategory? _category;
   bool _opening = false;
+  bool _tracing = false;
+
+  /// A picture shared from another app while a drawing was open.
+  SharedImage? _waiting;
+
+  @override
+  void initState() {
+    super.initState();
+    RecentsStore.instance.load();
+    ShareInbox.listen(_onShared, onError: _toast);
+  }
+
+  @override
+  void dispose() {
+    ShareInbox.stop();
+    super.dispose();
+  }
+
+  void _toast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
 
   Future<void> _open(Future<TraceDocument?> Function() load) async {
-    if (_opening) return;
+    if (_opening || _tracing) return;
     setState(() => _opening = true);
     TraceDocument? doc;
     try {
       doc = await load();
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not open that image: $e')));
-      }
+      _toast('Could not open that image: $e');
     } finally {
       if (mounted) setState(() => _opening = false);
     }
-    if (doc == null || !mounted) return;
-    await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => TraceScreen(document: doc!)));
+    if (doc != null && mounted) {
+      _tracing = true;
+      final route = MaterialPageRoute<void>(builder: (_) => TraceScreen(document: doc!));
+      await Navigator.of(context).push(route);
+      // The tracer keeps the camera until its exit transition has finished;
+      // opening the next one earlier would have its camera closed under it.
+      await route.completed;
+      await WidgetsBinding.instance.endOfFrame;
+      _tracing = false;
+    }
+    final next = _waiting;
+    _waiting = null;
+    if (next != null && mounted) unawaited(_open(() => _import(next.name, next.bytes)));
+  }
+
+  void _onShared(SharedImage image) {
+    if (!mounted) return;
+    if (_opening || _tracing) {
+      _waiting = image;
+      if (_tracing) _toast('Picture received. Leave this drawing to start tracing it.');
+      return;
+    }
+    _open(() => _import(image.name, image.bytes));
+  }
+
+  /// Decodes an imported picture and keeps a copy on the "Your pieces" shelf.
+  Future<TraceDocument?> _import(String fileName, Uint8List bytes) async {
+    final img = await decodeLimited(bytes, maxDim: 2048);
+    final title = pieceTitle(fileName);
+    String? id;
+    try {
+      id = (await RecentsStore.instance.add(title, bytes)).id;
+    } catch (e) {
+      debugPrint('could not keep a copy of the picture: $e'); // tracing still works without the shelf
+    }
+    return TraceDocument.image(title: title, image: img, pieceId: id);
   }
 
   Future<TraceDocument?> _pick(ImageSource source) async {
     final file = await ImagePicker().pickImage(source: source, requestFullMetadata: false);
     if (file == null) return null;
-    final img = await decodeLimited(await file.readAsBytes(), maxDim: 2048);
-    final name = file.name.contains('.') ? file.name.substring(0, file.name.lastIndexOf('.')) : file.name;
-    // Pickers often hand back generated names (numeric ids, cache prefixes).
-    final generated = name.isEmpty || RegExp(r'^[0-9_-]+$').hasMatch(name) || name.startsWith('image_picker') || name.startsWith('scaled_');
-    return TraceDocument.image(title: generated ? 'Your photo' : name, image: img);
+    return _import(file.name, await file.readAsBytes());
+  }
+
+  Future<TraceDocument?> _reopen(RecentPiece piece) async {
+    final img = await decodeLimited(await piece.file.readAsBytes(), maxDim: 2048);
+    await RecentsStore.instance.touch(piece.id);
+    return TraceDocument.image(title: piece.title, image: img, pieceId: piece.id);
+  }
+
+  Future<void> _confirmRemove(RecentPiece piece) async {
+    final remove = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Palette.graphite2,
+        title: Text('Remove “${piece.title}”?', style: TextStyles.title),
+        content: const Text('Vellum forgets its copy. The original in your gallery is not touched.', style: TextStyles.body),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Remove')),
+        ],
+      ),
+    );
+    if (remove ?? false) await RecentsStore.instance.remove(piece.id);
   }
 
   @override
@@ -63,6 +142,39 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: _PhotoHero(
                     onGallery: () => _open(() => _pick(ImageSource.gallery)),
                     onCamera: () => _open(() => _pick(ImageSource.camera)),
+                  ),
+                ),
+                SliverToBoxAdapter(
+                  child: ListenableBuilder(
+                    listenable: RecentsStore.instance,
+                    builder: (context, _) {
+                      final pieces = RecentsStore.instance.pieces;
+                      if (pieces.isEmpty) return const SizedBox.shrink();
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const _SectionTitle('Your pieces', 'Pick up a picture you were tracing. Hold one to remove it.'),
+                          SizedBox(
+                            height: 196,
+                            child: ListView.separated(
+                              padding: const EdgeInsets.symmetric(horizontal: 20),
+                              scrollDirection: Axis.horizontal,
+                              itemCount: pieces.length,
+                              separatorBuilder: (_, _) => const SizedBox(width: 14),
+                              itemBuilder: (_, i) {
+                                final p = pieces[i];
+                                return _PieceCard(
+                                  key: ValueKey(p.file.path),
+                                  piece: p,
+                                  onTap: () => _open(() => _reopen(p)),
+                                  onLongPress: () => _confirmRemove(p),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      );
+                    },
                   ),
                 ),
                 const SliverToBoxAdapter(
@@ -348,6 +460,71 @@ class _LessonCard extends StatelessWidget {
               Text(lesson.title, style: TextStyles.label.copyWith(fontSize: 14.5), maxLines: 1, overflow: TextOverflow.ellipsis),
               const SizedBox(height: 2),
               Text(lesson.blurb, style: TextStyles.bodyDim.copyWith(fontSize: 12.5), maxLines: 1, overflow: TextOverflow.ellipsis),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A saved picture on the "Your pieces" shelf.
+class _PieceCard extends StatelessWidget {
+  const _PieceCard({super.key, required this.piece, required this.onTap, required this.onLongPress});
+  final RecentPiece piece;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
+
+  static String _ago(DateTime t) {
+    final now = DateTime.now();
+    final days = DateTime(now.year, now.month, now.day).difference(DateTime(t.year, t.month, t.day)).inDays;
+    if (days <= 0) return 'TODAY';
+    if (days == 1) return 'YESTERDAY';
+    if (days < 60) return '$days DAYS AGO';
+    return '${t.year}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: 'Your piece: ${piece.title}, opened ${_ago(piece.opened).toLowerCase()}',
+      onLongPressHint: 'Remove',
+      excludeSemantics: true,
+      child: InkWell(
+        onTap: onTap,
+        onLongPress: onLongPress,
+        borderRadius: BorderRadius.circular(12),
+        child: SizedBox(
+          width: 112,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                height: 140,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Palette.paper,
+                    borderRadius: BorderRadius.circular(4),
+                    boxShadow: const [BoxShadow(color: Color(0x66000000), blurRadius: 10, offset: Offset(0, 4))],
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: Image.file(
+                      piece.file,
+                      fit: BoxFit.cover,
+                      width: 112,
+                      height: 140,
+                      cacheWidth: 336,
+                      errorBuilder: (_, _, _) => const Center(child: Icon(Icons.broken_image_outlined, color: Palette.rule)),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 9),
+              Text(piece.title, style: TextStyles.label, maxLines: 1, overflow: TextOverflow.ellipsis),
+              const SizedBox(height: 3),
+              Text(_ago(piece.opened), style: TextStyles.mono.copyWith(fontSize: 9.5)),
             ],
           ),
         ),

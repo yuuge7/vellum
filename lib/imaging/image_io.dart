@@ -59,6 +59,20 @@ Future<ui.Image> decodeLimited(Uint8List bytes, {int maxDim = 2048}) async {
   return frame.image;
 }
 
+/// Copies the [region] of [image] (in pixels) into a new image.
+Future<ui.Image> cropImage(ui.Image image, ui.Rect region) {
+  final w = math.max(1, region.width.round()), h = math.max(1, region.height.round());
+  return renderToImage(w, h, (c, size) {
+    c.drawImageRect(image, region, ui.Offset.zero & size, ui.Paint()..filterQuality = ui.FilterQuality.none);
+  });
+}
+
+/// PNG-encodes [image] (used to keep a cropped piece on disk).
+Future<Uint8List> encodePng(ui.Image image) async {
+  final data = await image.toByteData(format: ui.ImageByteFormat.png);
+  return data!.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+}
+
 /// Renders a vector drawing callback into an image.
 Future<ui.Image> renderToImage(int width, int height, void Function(ui.Canvas canvas, ui.Size size) draw) async {
   final rec = ui.PictureRecorder();

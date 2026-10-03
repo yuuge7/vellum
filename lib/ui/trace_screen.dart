@@ -11,9 +11,12 @@ import '../camera/ar_session.dart';
 import '../camera/camera_geometry.dart';
 import '../camera/camera_service.dart';
 import '../capture/timelapse_recorder.dart';
+import '../imaging/image_io.dart';
+import '../library/recents.dart';
 import '../models/overlay_controller.dart';
 import '../models/trace_document.dart';
 import '../tracking/tracker.dart';
+import 'crop_screen.dart';
 import 'overlay_painter.dart';
 import 'theme.dart';
 import 'widgets.dart';
@@ -43,6 +46,11 @@ class _TraceScreenState extends State<TraceScreen> with WidgetsBindingObserver, 
   String? _lastOverlayError;
   String? _lastRecError;
   double? _detailDraft;
+  double? _inkDraft;
+
+  // Quick strobe key: what the strobe was doing when the press began.
+  bool _strobeBefore = false;
+  final Stopwatch _strobePress = Stopwatch();
 
   Offset _lastFocal = Offset.zero;
   double _lastScale = 1;
@@ -151,23 +159,89 @@ class _TraceScreenState extends State<TraceScreen> with WidgetsBindingObserver, 
     _overlay.applyViewDelta(similarityAbout(center, center, 1, math.pi / 2));
   }
 
-  Future<void> _makeLesson() async {
-    final doc = await _overlay.buildPhotoLesson();
-    if (doc == null || !mounted) return;
-    _docs.add(doc);
+  /// Replaces the document being traced; [next] already carries the
+  /// placement it should start from.
+  void _swapOverlay(OverlayController next) {
+    _docs.add(next.doc);
     final old = _overlay;
-    final next = OverlayController(doc)..adoptPlacement(old);
-    next.locked = old.locked;
     _detach(old);
     _overlay = next;
     _ar.overlay = next;
     _attach(next);
     _reveal.value = 1;
+    WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
+  }
+
+  Future<void> _makeLesson() async {
+    final old = _overlay;
+    final doc = await old.buildPhotoLesson();
+    if (doc == null) return;
+    if (!mounted || !identical(old, _overlay)) {
+      doc.dispose();
+      return;
+    }
+    final next = OverlayController(doc)..adoptPlacement(old);
+    next.locked = old.locked;
+    _swapOverlay(next);
     setState(() => _tool = null);
     _ar.setPreview(false);
-    WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
     _toast('Lesson ready: outline, shadows, mid-tones, highlights.');
   }
+
+  Future<void> _cropImage() async {
+    final old = _overlay;
+    final src = old.doc.image;
+    if (src == null) return;
+    final crop = await Navigator.of(context).push<Rect>(MaterialPageRoute<Rect>(builder: (_) => CropScreen(image: src)));
+    if (crop == null || !mounted || !identical(old, _overlay)) return;
+    final img = await cropImage(src, crop);
+    if (!mounted || !identical(old, _overlay)) {
+      img.dispose();
+      return;
+    }
+    final doc = TraceDocument.image(title: old.doc.title, image: img, isPhoto: old.doc.isPhoto, pieceId: old.doc.pieceId);
+    _swapOverlay(OverlayController(doc)..adoptCrop(old, crop));
+    setState(() {});
+    _toast('Cropped. What is left stayed where it was.');
+    // The shelf keeps the cropped picture, so reopening the piece matches the drawing.
+    final id = doc.pieceId;
+    if (id != null) {
+      try {
+        await RecentsStore.instance.replaceImage(id, await encodePng(img));
+      } catch (e) {
+        debugPrint('could not save the cropped picture: $e');
+      }
+    }
+  }
+
+  // Quick strobe: a short tap switches it on or off, a longer press flashes
+  // the image only while the finger is down.
+  void _strobeDown() {
+    HapticFeedback.selectionClick();
+    _strobeBefore = _overlay.strobeOn;
+    _strobePress
+      ..reset()
+      ..start();
+    if (!_strobeBefore) _overlay.strobeOn = true;
+  }
+
+  void _strobeUp() {
+    final tapped = _strobePress.elapsedMilliseconds < 350;
+    _strobePress.stop();
+    _overlay.strobeOn = tapped && !_strobeBefore;
+  }
+
+  void _strobeCancel() => _overlay.strobeOn = _strobeBefore;
+
+  Widget _strobeKey() => HoldButton(
+        icon: Icons.flare,
+        semanticLabel: _overlay.strobeOn ? 'Strobe is on. Tap to turn off' : 'Strobe. Tap to turn on, or hold to flash while held',
+        active: _overlay.strobeOn,
+        onDown: _strobeDown,
+        onUp: _strobeUp,
+        onCancel: _strobeCancel,
+        onTap: () => _overlay.strobeOn = !_overlay.strobeOn,
+      );
 
   Future<bool> _confirmLeave() async {
     if (_rec.state != RecordState.recording) return true;
@@ -312,7 +386,14 @@ class _TraceScreenState extends State<TraceScreen> with WidgetsBindingObserver, 
         Positioned(
           right: 14,
           bottom: pad.bottom + 16,
-          child: HudButton(icon: Icons.visibility_outlined, tooltip: 'Show controls', onPressed: () => setState(() => _hud = true)),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListenableBuilder(listenable: _overlay, builder: (context, _) => _strobeKey()),
+              const SizedBox(width: 12),
+              HudButton(icon: Icons.visibility_outlined, tooltip: 'Show controls', onPressed: () => setState(() => _hud = true)),
+            ],
+          ),
         ),
         Positioned(
           left: 14,
@@ -475,7 +556,13 @@ class _TraceScreenState extends State<TraceScreen> with WidgetsBindingObserver, 
                     _LessonBar(controller: _overlay, recording: recording),
                     const SizedBox(height: 10),
                   ],
-                  _OpacityBar(controller: _overlay),
+                  Row(
+                    children: [
+                      Expanded(child: _OpacityBar(controller: _overlay)),
+                      const SizedBox(width: 10),
+                      _strobeKey(),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -565,7 +652,24 @@ class _TraceScreenState extends State<TraceScreen> with WidgetsBindingObserver, 
             ],
           ],
         ),
-        const SizedBox(height: 6),
+        if (_ar.target == TrackTarget.paper)
+          ValueListenableBuilder<List<Offset>?>(
+            valueListenable: _ar.sheet,
+            builder: (context, sheet, _) => Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: sheet == null || _overlay.locked
+                    ? null
+                    : () {
+                        if (_overlay.fitToSheet(sheet)) _toast('Centred on the sheet with an even margin.');
+                      },
+                icon: const Icon(Icons.filter_center_focus, size: 18),
+                label: const Text('Centre on the sheet'),
+              ),
+            ),
+          )
+        else
+          const SizedBox(height: 6),
         ValueListenableBuilder<List<Offset>>(
           valueListenable: _ar.points,
           builder: (context, pts, _) => Text(
@@ -587,6 +691,22 @@ class _TraceScreenState extends State<TraceScreen> with WidgetsBindingObserver, 
           trailing: Switch(value: _overlay.strobeOn, onChanged: (v) => _overlay.strobeOn = v),
         ),
         const Text('Flickers the image so gaps between your lines and the reference jump out.', style: TextStyles.bodyDim),
+        const SizedBox(height: 6),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.only(top: 1, right: 6),
+              child: Icon(Icons.flare, size: 15, color: Palette.blue),
+            ),
+            Expanded(
+              child: Text(
+                'The round key beside the opacity slider does the same from anywhere: tap to switch, or hold it to flash only while you look.',
+                style: TextStyles.bodyDim.copyWith(color: Palette.vellum),
+              ),
+            ),
+          ],
+        ),
         const SizedBox(height: 8),
         Row(
           children: [
@@ -624,6 +744,7 @@ class _TraceScreenState extends State<TraceScreen> with WidgetsBindingObserver, 
           showSelectedIcon: false,
           segments: const [
             ButtonSegment(value: ViewMode.original, label: Text('Photo')),
+            ButtonSegment(value: ViewMode.ink, label: Text('Ink')),
             ButtonSegment(value: ViewMode.lines, label: Text('Lines')),
             ButtonSegment(value: ViewMode.tones, label: Text('Tones')),
           ],
@@ -638,7 +759,29 @@ class _TraceScreenState extends State<TraceScreen> with WidgetsBindingObserver, 
         ],
         const SizedBox(height: 8),
         if (o.mode == ViewMode.original)
-          const Text('Lines turns the photo into clean outlines. Tones splits it into shading layers.', style: TextStyles.bodyDim),
+          const Text(
+            'Ink drops the background of finished artwork and keeps its lines. Lines outlines a photo. Tones splits it into shading layers.',
+            style: TextStyles.bodyDim,
+          ),
+        if (o.mode == ViewMode.ink) ...[
+          Row(
+            children: [
+              const SizedBox(width: 56, child: Text('Detail', style: TextStyles.label)),
+              Expanded(
+                child: Slider(
+                  value: _inkDraft ?? o.inkDetail,
+                  onChanged: (v) => setState(() => _inkDraft = v),
+                  onChangeEnd: (v) {
+                    _inkDraft = null;
+                    o.inkDetail = v;
+                  },
+                  semanticFormatterCallback: (v) => 'Keep faint marks ${(v * 100).round()} percent',
+                ),
+              ),
+            ],
+          ),
+          _inkRow(o),
+        ],
         if (o.mode == ViewMode.lines) ...[
           Row(
             children: [
@@ -672,12 +815,7 @@ class _TraceScreenState extends State<TraceScreen> with WidgetsBindingObserver, 
             ],
           ),
           const SizedBox(height: 6),
-          Row(
-            children: [
-              const SizedBox(width: 56, child: Text('Ink', style: TextStyles.label)),
-              for (final ink in LineInk.values) _InkSwatch(ink: ink, selected: o.lineInk == ink, onTap: () => o.lineInk = ink),
-            ],
-          ),
+          _inkRow(o),
         ],
         if (o.mode == ViewMode.tones) ...[
           Row(
@@ -730,6 +868,13 @@ class _TraceScreenState extends State<TraceScreen> with WidgetsBindingObserver, 
       ],
     );
   }
+
+  Widget _inkRow(OverlayController o) => Row(
+        children: [
+          const SizedBox(width: 56, child: Text('Colour', style: TextStyles.label)),
+          for (final ink in LineInk.values) _InkSwatch(ink: ink, selected: o.lineInk == ink, onTap: () => o.lineInk = ink),
+        ],
+      );
 
   Widget _recordPanel() {
     final recording = _rec.state == RecordState.recording;
@@ -799,6 +944,25 @@ class _TraceScreenState extends State<TraceScreen> with WidgetsBindingObserver, 
             _PanelAction(icon: Icons.fit_screen_outlined, label: 'Fit', onTap: _overlay.locked ? null : () => _overlay.fitTo(_view, force: true)),
             _PanelAction(icon: Icons.flip, label: 'Mirror', onTap: _overlay.locked ? null : _overlay.flip),
             _PanelAction(icon: Icons.rotate_90_degrees_cw_outlined, label: 'Rotate 90°', onTap: _overlay.locked ? null : _rotate90),
+            if (_overlay.doc.image != null) _PanelAction(icon: Icons.crop, label: 'Crop', onTap: _overlay.locked ? null : _cropImage),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            const SizedBox(width: 44, child: Text('Grid', style: TextStyles.label)),
+            for (final n in const [0, 3, 4, 6])
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: ChoiceChip(
+                  label: Text(n == 0 ? 'Off' : '$n'),
+                  tooltip: n == 0 ? 'No grid' : '$n squares across the short side',
+                  selected: _overlay.grid == n,
+                  showCheckmark: false,
+                  onSelected: (_) => _overlay.grid = n,
+                  labelStyle: TextStyles.label.copyWith(color: _overlay.grid == n ? Palette.blueInk : Palette.vellum),
+                ),
+              ),
           ],
         ),
       ],

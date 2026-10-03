@@ -105,6 +105,75 @@ class HudButton extends StatelessWidget {
   }
 }
 
+/// Round HUD button that reports press and release, for controls that act
+/// while held. Looks like [HudButton]; [onTap] serves screen readers, which
+/// cannot hold.
+class HoldButton extends StatefulWidget {
+  const HoldButton({
+    super.key,
+    required this.icon,
+    required this.semanticLabel,
+    required this.onDown,
+    required this.onUp,
+    required this.onCancel,
+    required this.onTap,
+    this.active = false,
+  });
+
+  final IconData icon;
+  final String semanticLabel;
+  final VoidCallback onDown;
+  final VoidCallback onUp;
+  final VoidCallback onCancel;
+  final VoidCallback onTap;
+  final bool active;
+
+  @override
+  State<HoldButton> createState() => _HoldButtonState();
+}
+
+class _HoldButtonState extends State<HoldButton> {
+  bool _down = false;
+
+  void _set(bool v, VoidCallback notify) {
+    setState(() => _down = v);
+    notify();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final lit = widget.active || _down;
+    return Semantics(
+      button: true,
+      toggled: widget.active,
+      label: widget.semanticLabel,
+      onTap: widget.onTap,
+      excludeSemantics: true,
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (_) => _set(true, widget.onDown),
+        onPointerUp: (_) => _set(false, widget.onUp),
+        onPointerCancel: (_) => _set(false, widget.onCancel),
+        child: AnimatedScale(
+          scale: _down ? 0.92 : 1,
+          duration: const Duration(milliseconds: 90),
+          child: Container(
+            width: 48,
+            height: 48,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: lit ? Palette.blue : Palette.graphite.withValues(alpha: 0.78),
+              border: Border.all(color: lit ? Palette.blue : Palette.rule.withValues(alpha: 0.8)),
+            ),
+            child: Icon(widget.icon, size: 22, color: lit ? Palette.graphite : Palette.vellum),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Small uppercase-free caption row used inside panels.
 class PanelHeader extends StatelessWidget {
   const PanelHeader(this.title, {super.key, this.trailing});

@@ -2,6 +2,7 @@ import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:ar_drawing/camera/camera_geometry.dart';
+import 'package:ar_drawing/imaging/ink.dart';
 import 'package:ar_drawing/imaging/raster.dart';
 import 'package:ar_drawing/imaging/stencil.dart';
 import 'package:ar_drawing/imaging/tonal.dart';
@@ -54,6 +55,42 @@ void main() {
       final img = _image(120, 120, (x, y) => x < 60 ? 30 : 230);
       int count(Rgba m) => [for (var i = 3; i < m.px.length; i += 4) m.px[i]].where((a) => a != 0).length;
       expect(count(extractLineArt(img, weight: 3)), greaterThan(count(extractLineArt(img, weight: 1)) * 2));
+    });
+  });
+
+  group('ink', () {
+    int alpha(Rgba m, int x, int y) => m.px[(y * m.width + x) * 4 + 3];
+
+    test('keeps a pen line whole and drops the page', () {
+      // 5 px line: edge detection would outline both sides and leave the middle empty.
+      final img = _image(120, 80, (x, y) => (x - 60).abs() <= 2 ? 20 : 250);
+      final ink = extractInk(img);
+      for (var x = 58; x <= 62; x++) {
+        expect(alpha(ink, x, 40), 255);
+      }
+      expect(alpha(ink, 20, 40), 0);
+      expect(alpha(ink, 100, 40), 0);
+    });
+
+    test('detail decides whether faint shading survives', () {
+      final img = _image(120, 80, (x, y) => x >= 40 && x < 80 ? 215 : 250);
+      expect(alpha(extractInk(img, detail: 0.5), 60, 40), 0);
+      expect(alpha(extractInk(img, detail: 1), 60, 40), greaterThan(60));
+    });
+
+    test('light art on a dark page is lifted too', () {
+      final img = _image(120, 80, (x, y) => (y - 40).abs() <= 2 ? 240 : 12);
+      final ink = extractInk(img);
+      expect(alpha(ink, 60, 40), 255);
+      expect(alpha(ink, 60, 10), 0);
+    });
+
+    test('output is premultiplied white', () {
+      final img = _image(60, 60, (x, y) => x >= 20 && x < 40 ? 150 : 250);
+      final ink = extractInk(img);
+      final i = (30 * 60 + 30) * 4;
+      expect(ink.px[i + 3], inExclusiveRange(0, 255));
+      expect(ink.px.sublist(i, i + 3), everyElement(ink.px[i + 3]));
     });
   });
 
